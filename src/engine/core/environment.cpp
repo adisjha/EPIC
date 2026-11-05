@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 // Define EPIC_ENABLE_ENV_TIMING at compile time to enable
 // environment step timing diagnostics.
@@ -277,7 +277,8 @@ namespace src::engine::env{
 
                 auto t_cc_start = clock::now();
                 if (gauss_projection_enabled_){
-                    auto Ecc = src::fields::solvers::poisson_solver(fields_);
+                    src::fields::solvers::poisson_solve_yee(fields_);
+                    auto Ecc = src::coupling::make_cell_center_E(fields_);
                     _2vf3 Bcc;
                     Bcc.n_x = mesh_.nx_cells();
                     Bcc.n_y = mesh_.ny_cells();
@@ -490,11 +491,8 @@ namespace src::engine::env{
 
             if (field_mode_ == FieldMode::SelfConsistent &&
                 field_update_ == FieldUpdateKind::PoissonYee){
-                // Use the stable cell-centred electrostatic solve for particle
-                // pushing. The current nodal/Yee reconstruction is not robust
-                // for sharply localized particle sources.
                 auto t_build_poisson_start = clock::now();
-                Ecc = src::fields::solvers::poisson_solver(fields_);
+                Ecc = src::coupling::make_cell_center_E(fields_);
                 auto t_build_poisson_end = clock::now();
                 build_poisson_time = t_build_poisson_end - t_build_poisson_start;
                 Bcc.n_x = mesh_.nx_cells();

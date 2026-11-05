@@ -1,6 +1,11 @@
-﻿#include <cmath>
+#include <cmath>
+#include <cstdlib>
 #include <chrono>
 #include <iostream>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 #include "include/types.hpp"
 #include "include/constants.hpp"
@@ -716,6 +721,16 @@ namespace src::fields::solvers{
         using clock    = std::chrono::high_resolution_clock;
         using duration = std::chrono::duration<double>;
 
+#ifdef _OPENMP
+        int num_threads = omp_get_max_threads();
+        const char* env_threads = std::getenv("EPIC_NUM_THREADS");
+        if (env_threads != nullptr){
+            int requested = std::atoi(env_threads);
+            requested = std::max(1, std::min(requested, omp_get_max_threads()));
+            omp_set_num_threads(requested);
+        }
+#endif
+
         auto t_start = clock::now();
 
         const _2Mesh& mesh = fm.mesh();
@@ -726,17 +741,24 @@ namespace src::fields::solvers{
 
 #ifdef EPIC_USE_MULTIGRID_POISSON
         // Multigrid: build nodal RHS: -rho_node/eps0 and solve.
-        _2sf rho_node;
-        build_nodal_rho_2d(mesh, rho, rho_node);
-
         const int nx_nodes = mesh.nx_nodes();
         const int ny_nodes = mesh.ny_nodes();
+        const std::size_t node_size = static_cast<std::size_t>(nx_nodes) * ny_nodes;
 
-        _2sf rhs_node;
-        rhs_node.n_x = nx_nodes;
-        rhs_node.n_y = ny_nodes;
-        rhs_node.data.assign(static_cast<std::size_t>(nx_nodes) * ny_nodes,
-                             real{0});
+        static _2sf rho_node;
+        if (rho_node.data.size() != node_size) {
+            rho_node.n_x = nx_nodes;
+            rho_node.n_y = ny_nodes;
+            rho_node.data.assign(node_size, real{0});
+        }
+        build_nodal_rho_2d(mesh, rho, rho_node);
+
+        static _2sf rhs_node;
+        if (rhs_node.data.size() != node_size) {
+            rhs_node.n_x = nx_nodes;
+            rhs_node.n_y = ny_nodes;
+            rhs_node.data.assign(node_size, real{0});
+        }
 
         const real inv_eps0 =
             static_cast<real>(1.0) / static_cast<real>(constants::epsilon_0);
@@ -801,22 +823,31 @@ namespace src::fields::solvers{
             const real omega = static_cast<real>(2.0 / 3.0);
 
             for (int it = 0; it < iters; ++it){
-                for (int color = 0; color < 2; ++color){
-                    for (int j = 1; j < ny - 1; ++j){
-                        for (int i = 1; i < nx - 1; ++i){
-                            if ( ( (i + j) & 1 ) != color ) continue;
+                // Red cells (i+j even)
+                #pragma omp parallel for collapse(2) schedule(static)
+                for (int j = 1; j < ny - 1; ++j){
+                    for (int i = 1; i < nx - 1; ++i){
+                        if (((i + j) & 1) != 0) continue;
+                        const real phiN = phi.valueAt(i, j + 1);
+                        const real phiS = phi.valueAt(i, j - 1);
+                        const real phiE = phi.valueAt(i + 1, j);
+                        const real phiW = phi.valueAt(i - 1, j);
+                        const real phi_new = inv4 * (phiN + phiS + phiE + phiW - h2 * rhs.valueAt(i, j));
+                        phi.valueAt(i, j) = phi.valueAt(i, j) + omega * (phi_new - phi.valueAt(i, j));
+                    }
+                }
 
-                            const real phiN = phi.valueAt(i, j + 1);
-                            const real phiS = phi.valueAt(i, j - 1);
-                            const real phiE = phi.valueAt(i + 1, j);
-                            const real phiW = phi.valueAt(i - 1, j);
-                            const real rhs_ij = rhs.valueAt(i, j);
-
-                            const real phi_new =
-                                inv4 * (phiN + phiS + phiE + phiW - h2 * rhs_ij);
-                            const real old = phi.valueAt(i, j);
-                            phi.valueAt(i, j) = old + omega * (phi_new - old);
-                        }
+                // Black cells (i+j odd)
+                #pragma omp parallel for collapse(2) schedule(static)
+                for (int j = 1; j < ny - 1; ++j){
+                    for (int i = 1; i < nx - 1; ++i){
+                        if (((i + j) & 1) != 1) continue;
+                        const real phiN = phi.valueAt(i, j + 1);
+                        const real phiS = phi.valueAt(i, j - 1);
+                        const real phiE = phi.valueAt(i + 1, j);
+                        const real phiW = phi.valueAt(i - 1, j);
+                        const real phi_new = inv4 * (phiN + phiS + phiE + phiW - h2 * rhs.valueAt(i, j));
+                        phi.valueAt(i, j) = phi.valueAt(i, j) + omega * (phi_new - phi.valueAt(i, j));
                     }
                 }
             }
@@ -834,6 +865,7 @@ namespace src::fields::solvers{
             res.n_y = ny;
             res.data.assign(static_cast<std::size_t>(nx) * ny, real{0});
 
+            #pragma omp parallel for collapse(2) schedule(static)
             for (int j = 1; j < ny - 1; ++j){
                 for (int i = 1; i < nx - 1; ++i){
                     const real phiC = phi.valueAt(i, j);
@@ -862,6 +894,7 @@ namespace src::fields::solvers{
             coarse.n_y = ny_c;
             coarse.data.assign(static_cast<std::size_t>(nx_c) * ny_c, real{0});
 
+            #pragma omp parallel for collapse(2) schedule(static)
             for (int J = 1; J < ny_c - 1; ++J){
                 for (int I = 1; I < nx_c - 1; ++I){
                     const int i = 2 * I;
@@ -899,6 +932,7 @@ namespace src::fields::solvers{
             fine.data.assign(static_cast<std::size_t>(nx_f) * ny_f, real{0});
 
             // Inject coarse points.
+            #pragma omp parallel for collapse(2) schedule(static)
             for (int J = 0; J < ny_c; ++J){
                 for (int I = 0; I < nx_c; ++I){
                     const int i = 2 * I;
@@ -910,6 +944,7 @@ namespace src::fields::solvers{
             }
 
             // Interpolate in x for even rows.
+            #pragma omp parallel for collapse(2) schedule(static)
             for (int j = 0; j < ny_f; j += 2){
                 for (int i = 1; i < nx_f - 1; i += 2){
                     fine.valueAt(i, j) = static_cast<real>(0.5) *
@@ -919,6 +954,7 @@ namespace src::fields::solvers{
             }
 
             // Interpolate in y for all columns.
+            #pragma omp parallel for collapse(2) schedule(static)
             for (int j = 1; j < ny_f - 1; j += 2){
                 for (int i = 0; i < nx_f; ++i){
                     fine.valueAt(i, j) = static_cast<real>(0.5) *
@@ -940,7 +976,7 @@ namespace src::fields::solvers{
             }
 
             // Pre-smoothing.
-            smooth_rb_jacobi_2d(phi, rhs, h, 3);
+            smooth_rb_jacobi_2d(phi, rhs, h, 2);
 
             // Residual.
             _2sf res;
@@ -973,109 +1009,109 @@ namespace src::fields::solvers{
             }
 
             // Post-smoothing.
-            smooth_rb_jacobi_2d(phi, rhs, h, 3);
-        }
-
-        static void apply_standard_laplacian_2d(const _2sf& phi,
-                                                _2sf& out,
-                                                real h){
-            const int nx = phi.n_x;
-            const int ny = phi.n_y;
-            const real inv_h2 = static_cast<real>(1.0) / (h * h);
-
-            out.n_x = nx;
-            out.n_y = ny;
-            out.data.assign(static_cast<std::size_t>(nx) * ny, real{0});
-
-            for (int j = 1; j < ny - 1; ++j){
-                for (int i = 1; i < nx - 1; ++i){
-                    out.valueAt(i, j) =
-                        (phi.valueAt(i + 1, j) + phi.valueAt(i - 1, j) +
-                         phi.valueAt(i, j + 1) + phi.valueAt(i, j - 1) -
-                         static_cast<real>(4.0) * phi.valueAt(i, j)) * inv_h2;
-                }
-            }
-        }
-
-        static void solve_poisson_standard_2d_warm(const _2Mesh& mesh,
-                                                   const _2sf& rhs,
-                                                   _2sf& phi_io){
-            const int nx = rhs.n_x;
-            const int ny = rhs.n_y;
-            const real h = mesh.dx();
-
-            if (phi_io.n_x != nx || phi_io.n_y != ny ||
-                phi_io.data.size() != static_cast<std::size_t>(nx) * ny){
-                phi_io.n_x = nx;
-                phi_io.n_y = ny;
-                phi_io.data.assign(static_cast<std::size_t>(nx) * ny, real{0});
-            }
-
-            _2sf r, p, Ap;
-            r.n_x = p.n_x = Ap.n_x = nx;
-            r.n_y = p.n_y = Ap.n_y = ny;
-            r.data.assign(static_cast<std::size_t>(nx) * ny, real{0});
-
-            apply_standard_laplacian_2d(phi_io, Ap, h);
-
-            for (int j = 1; j < ny - 1; ++j){
-                for (int i = 1; i < nx - 1; ++i){
-                    r.valueAt(i, j) = rhs.valueAt(i, j) - Ap.valueAt(i, j);
-                }
-            }
-
-            p = r;
-
-            auto dot = [&](const _2sf& a, const _2sf& b) -> real {
-                real sum = real{0};
-                for (int j = 1; j < ny - 1; ++j){
-                    for (int i = 1; i < nx - 1; ++i){
-                        sum += a.valueAt(i, j) * b.valueAt(i, j);
-                    }
-                }
-                return sum;
-            };
-
-            real rr = dot(r, r);
-            if (rr == real{0}){
-                return;
-            }
-
-            const real tol_rel = static_cast<real>(1e-6);
-            const real tol2 = tol_rel * tol_rel * rr;
-            const int max_iter = 2000;
-
-            for (int it = 0; it < max_iter; ++it){
-                apply_standard_laplacian_2d(p, Ap, h);
-
-                const real pAp = dot(p, Ap);
-                if (std::abs(pAp) < static_cast<real>(1e-30)){
-                    break;
-                }
-
-                const real alpha = rr / pAp;
-                for (int j = 1; j < ny - 1; ++j){
-                    for (int i = 1; i < nx - 1; ++i){
-                        phi_io.valueAt(i, j) += alpha * p.valueAt(i, j);
-                        r.valueAt(i, j) -= alpha * Ap.valueAt(i, j);
-                    }
-                }
-
-                const real rr_new = dot(r, r);
-                if (rr_new < tol2){
-                    break;
-                }
-
-                const real beta = rr_new / rr;
-                rr = rr_new;
-                for (int j = 1; j < ny - 1; ++j){
-                    for (int i = 1; i < nx - 1; ++i){
-                        p.valueAt(i, j) = r.valueAt(i, j) + beta * p.valueAt(i, j);
-                    }
-                }
-            }
+            smooth_rb_jacobi_2d(phi, rhs, h, 2);
         }
     } // namespace
+
+    static void apply_standard_laplacian_2d(const _2sf& phi,
+                                            _2sf& out,
+                                            real h){
+        const int nx = phi.n_x;
+        const int ny = phi.n_y;
+        const real inv_h2 = static_cast<real>(1.0) / (h * h);
+
+        out.n_x = nx;
+        out.n_y = ny;
+        out.data.assign(static_cast<std::size_t>(nx) * ny, real{0});
+
+        for (int j = 1; j < ny - 1; ++j){
+            for (int i = 1; i < nx - 1; ++i){
+                out.valueAt(i, j) =
+                    (phi.valueAt(i + 1, j) + phi.valueAt(i - 1, j) +
+                     phi.valueAt(i, j + 1) + phi.valueAt(i, j - 1) -
+                      static_cast<real>(4.0) * phi.valueAt(i, j)) * inv_h2;
+            }
+        }
+    }
+
+    void solve_poisson_standard_2d_warm(const _2Mesh& mesh,
+                                       const _2sf& rhs,
+                                       _2sf& phi_io){
+        const int nx = rhs.n_x;
+        const int ny = rhs.n_y;
+        const real h = mesh.dx();
+
+        if (phi_io.n_x != nx || phi_io.n_y != ny ||
+            phi_io.data.size() != static_cast<std::size_t>(nx) * ny){
+            phi_io.n_x = nx;
+            phi_io.n_y = ny;
+            phi_io.data.assign(static_cast<std::size_t>(nx) * ny, real{0});
+        }
+
+        _2sf r, p, Ap;
+        r.n_x = p.n_x = Ap.n_x = nx;
+        r.n_y = p.n_y = Ap.n_y = ny;
+        r.data.assign(static_cast<std::size_t>(nx) * ny, real{0});
+
+        apply_standard_laplacian_2d(phi_io, Ap, h);
+
+        for (int j = 1; j < ny - 1; ++j){
+            for (int i = 1; i < nx - 1; ++i){
+                r.valueAt(i, j) = rhs.valueAt(i, j) - Ap.valueAt(i, j);
+            }
+        }
+
+        p = r;
+
+        auto dot = [&](const _2sf& a, const _2sf& b) -> real {
+            real sum = real{0};
+            for (int j = 1; j < ny - 1; ++j){
+                for (int i = 1; i < nx - 1; ++i){
+                    sum += a.valueAt(i, j) * b.valueAt(i, j);
+                }
+            }
+            return sum;
+        };
+
+        real rr = dot(r, r);
+        if (rr == real{0}){
+            return;
+        }
+
+        const real tol_rel = static_cast<real>(1e-6);
+        const real tol2 = tol_rel * tol_rel * rr;
+        const int max_iter = 2000;
+
+        for (int it = 0; it < max_iter; ++it){
+            apply_standard_laplacian_2d(p, Ap, h);
+
+            const real pAp = dot(p, Ap);
+            if (std::abs(pAp) < static_cast<real>(1e-30)){
+                break;
+            }
+
+            const real alpha = rr / pAp;
+            for (int j = 1; j < ny - 1; ++j){
+                for (int i = 1; i < nx - 1; ++i){
+                    phi_io.valueAt(i, j) += alpha * p.valueAt(i, j);
+                    r.valueAt(i, j) -= alpha * Ap.valueAt(i, j);
+                }
+            }
+
+            const real rr_new = dot(r, r);
+            if (rr_new < tol2){
+                break;
+            }
+
+            const real beta = rr_new / rr;
+            rr = rr_new;
+            for (int j = 1; j < ny - 1; ++j){
+                for (int i = 1; i < nx - 1; ++i){
+                    p.valueAt(i, j) = r.valueAt(i, j) + beta * p.valueAt(i, j);
+                }
+            }
+        }
+    }
 
     // Solve nodal Poisson with multigrid V-cycles: Lap(phi) = rhs.
     void solve_poisson_nodes_multigrid_2d(const _2Mesh& mesh,
@@ -1108,7 +1144,7 @@ namespace src::fields::solvers{
         real res_norm = l2_norm(res0);
 
         const real tol_rel = static_cast<real>(1e-6);
-        const int max_cycles = 20;
+        const int max_cycles = 10;
 
         int k = 0;
         while (k < max_cycles && res_norm > tol_rel * rhs_norm){
@@ -1121,6 +1157,10 @@ namespace src::fields::solvers{
         }
     }
 #endif
+
+    void solve_poisson_standard_2d_warm(const _2Mesh& mesh,
+                                       const _2sf& rhs,
+                                       _2sf& phi_io);
 
     static void compute_gauss_correction_phi_2d(const _2FieldManager& fm,
                                                 _2sf& phi_corr){

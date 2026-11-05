@@ -17,4 +17,4 @@
 
 Electromagnetic Particle-in-Cell (EPIC) is a research-grade PIC library written in C++ for conducting research in charged particle dynamics.
 
-EPIC is a personal project by @endqrmqn written with the intention of doing plasma physics research on a laptop (ambitious, right?). As a result of this daunting task, the code has been written with optimization in mind.
+EPIC is a personal project by @adisjha written with the intention of doing plasma physics research on a laptop (ambitious, right?). As a result of this daunting task, the code has been written with optimization in mind.

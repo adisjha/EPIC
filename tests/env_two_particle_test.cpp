@@ -1,4 +1,4 @@
-﻿#include <cmath>
+#include <cmath>
 #include <iostream>
 #include <chrono>
 #include <iomanip>
@@ -79,12 +79,19 @@ int main(){
     auto dump = [&](const char* label){
         const auto& grp = species.particles;
         vec2 P = src::diagnostics::total_momentum(grp);
+        auto acc = kernels::physics::structures::accFromLorentzField(
+            species.particles, mesh, src::coupling::make_cell_center_E(fm),
+            src::coupling::make_cell_center_B(fm));
+        vec2 F1 = grp.mass[0] * acc[0];
+        vec2 F2 = grp.mass[1] * acc[1];
         std::cout << label
                   << " t=" << env.time()
                   << " x1=" << grp.pos[0].x
                   << " x2=" << grp.pos[1].x
                   << " v1=" << grp.vel[0].x
                   << " v2=" << grp.vel[1].x
+                  << " Fx1=" << F1.x << " Fy1=" << F1.y
+                  << " Fx2=" << F2.x << " Fy2=" << F2.y
                   << " Px=" << P.x
                   << " Py=" << P.y
                   << "\n";
